@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS threads (
   line_end INTEGER NOT NULL,
   context TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT '',
+  pending INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'open',
   created_at REAL NOT NULL
 );
@@ -597,26 +598,33 @@ function captureSelection() {
   // block, so trim it, and any other edge whitespace, before mapping the selection to source lines.
   while (start < end && /\s/.test(text[start])) start++;
   while (end > start && /\s/.test(text[end - 1])) end--;
-  const quote = text.slice(start, end);
-  if (!quote) {
+  if (start === end) {
     // The text index skips diagrams, so a selection inside one comes back empty. Anchor to its label instead.
     const label = labelOf(range.startContainer);
     return label ? captureLabel(label) : null;
   }
+  const rects = range.getClientRects();
+  return {
+    ...textAnchor(start, end),
+    rect: rects[rects.length - 1] || range.getBoundingClientRect(),
+    range: rangeFor(start, end) || range.cloneRange(),
+  };
+}
+
+// The stored anchor for text-index offsets [start, end).
+function textAnchor(start, end) {
+  const { text } = textIndex();
   const spans = [start, end - 1].map((off) => linesOf(blockOf(charPoint(off)[0]))).filter((l) => l.line_start);
   const lineStart = spans.length ? Math.min(...spans.map((l) => l.line_start)) : 0;
   const lineEnd = spans.length ? Math.max(...spans.map((l) => l.line_end)) : 0;
-  const rects = range.getClientRects();
   return {
     kind: 'text',
-    quote,
+    quote: text.slice(start, end),
     prefix: text.slice(Math.max(0, start - 32), start),
     suffix: text.slice(end, end + 32),
     line_start: lineStart,
     line_end: lineEnd,
     context: sourceOf(lineStart, lineEnd),
-    rect: rects[rects.length - 1] || range.getBoundingClientRect(),
-    range: rangeFor(start, end) || range.cloneRange(),
   };
 }
 
@@ -675,14 +683,37 @@ const threadKind = (t) => t.kind || (t.quote ? 'text' : 'block');
 // it was made. A block comment re-anchors to the block whose source is unchanged. A diagram comment re-anchors to the
 // label with the same text, preferring the diagram it was made on. A comment that finds none of these is outdated: it
 // stays in the panel but has nothing to highlight.
+//
+// A thread the agent moved is pending: it names only a source line, and a quote unless it's on a whole block. The page
+// finds the block holding that line and the quote inside it, then saves the full anchor so the thread stops depending
+// on line numbers.
 
 function anchorAll() {
   anchors = new Map();
-  if (content) for (const t of state.threads) anchors.set(t.id, locate(t));
+  if (!content) return paint();
+  for (const t of state.threads) {
+    const a = locate(t);
+    anchors.set(t.id, a);
+    if (t.pending && a?.settle) settle(t, a.settle);
+  }
   paint();
 }
 
+const settling = new Set();
+
+async function settle(t, a) {
+  if (settling.has(t.id)) return;
+  settling.add(t.id);
+  try {
+    const { quote, prefix, suffix, line_start, line_end, context } = a;
+    await api('anchor', { thread_id: t.id, path: ctx.path, moved_line: t.line_start, quote, prefix, suffix, line_start, line_end, context });
+  } finally {
+    settling.delete(t.id);
+  }
+}
+
 function locate(t) {
+  if (t.pending) return locateMoved(t);
   const kind = threadKind(t);
   if (kind === 'diagram') return locateLabel(t);
   if (kind === 'block') {
@@ -704,6 +735,26 @@ function locate(t) {
   if (best < 0) return null;
   const range = rangeFor(best, best + t.quote.length);
   return range ? { range, el: blockOf(range.startContainer) } : null;
+}
+
+function locateMoved(t) {
+  const block = [...content.querySelectorAll('[data-src]')].find((e) => {
+    const lines = linesOf(e);
+    return lines.line_start <= t.line_start && t.line_start <= lines.line_end;
+  });
+  if (!block) return null;
+  const kind = threadKind(t);
+  if (kind === 'block') return { el: block, settle: captureBlock(block) };
+  if (kind === 'diagram') {
+    const label = [...block.querySelectorAll(LABEL_SELECTOR)].find((l) => labelText(l) === t.quote);
+    return label ? { el: label, label: true, settle: captureLabel(label) } : null;
+  }
+  const { text } = textIndex();
+  for (let i = text.indexOf(t.quote); i !== -1; i = text.indexOf(t.quote, i + 1)) {
+    const range = rangeFor(i, i + t.quote.length);
+    if (range && block.contains(range.startContainer)) return { range, el: block, settle: textAnchor(i, i + t.quote.length) };
+  }
+  return null;
 }
 
 // Tries the diagram whose source is unchanged first, then the rest by distance from where the comment was made, since
@@ -1321,6 +1372,19 @@ class Handler(SimpleHTTPRequestHandler):
         conn.execute("UPDATE threads SET status = ? WHERE id = ?", (status, thread["id"]))
         return {}
 
+    def feedback_settle_anchor(self, conn, body):
+        """Stores the anchor the page found for a thread the agent moved, so it no longer depends on line numbers."""
+        fields = {k: str(body.get(k, "")) for k in ("quote", "prefix", "suffix", "context")}
+        lines = (int(body["line_start"]), int(body["line_end"]))
+        conn.execute(
+            "UPDATE threads SET quote = ?, prefix = ?, suffix = ?, line_start = ?, line_end = ?, context = ?, pending = 0"
+            # Matching the moved-to line skips an anchor the page found for a move the agent has since replaced.
+            " WHERE id = ? AND pending = 1 AND file = ? AND line_start = ?",
+            (fields["quote"], fields["prefix"], fields["suffix"], *lines, fields["context"], int(body["thread_id"]),
+             self.rel_file(body["path"]), int(body["moved_line"])),
+        )
+        return {}
+
     def feedback_submit(self, conn, body):
         with transaction(conn):
             if not conn.execute("SELECT 1 FROM messages WHERE author = 'user' AND batch_id IS NULL").fetchone():
@@ -1384,6 +1448,7 @@ FEEDBACK_ACTIONS = {
     "delete": Handler.feedback_delete_draft,
     "status": Handler.feedback_set_status,
     "submit": Handler.feedback_submit,
+    "anchor": Handler.feedback_settle_anchor,
 }
 
 
@@ -1479,10 +1544,13 @@ def feedback_db(root, create=True):
 def migrate_feedback(conn):
     """Brings a database made by an older version up to FEEDBACK_SCHEMA."""
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(threads)")}
-    if "kind" not in columns:
-        # An empty kind means "infer it": a thread with a quote is a text comment, one without is a block comment.
+    # An empty kind means "infer it": a thread with a quote is a text comment, one without is a block comment.
+    added = {"kind": "TEXT NOT NULL DEFAULT ''", "pending": "INTEGER NOT NULL DEFAULT 0"}
+    for name, decl in added.items():
+        if name in columns:
+            continue
         try:
-            conn.execute("ALTER TABLE threads ADD COLUMN kind TEXT NOT NULL DEFAULT ''")
+            conn.execute(f"ALTER TABLE threads ADD COLUMN {name} {decl}")
         except sqlite3.OperationalError as err:
             if "duplicate column" not in str(err):
                 raise
@@ -1643,6 +1711,11 @@ def feedback_main(argv):
     reply.add_argument("thread", type=int)
     reply.add_argument("body", nargs="?", help='the reply, or "-" to read it from stdin')
     reply.add_argument("--body-file", help="read the reply from this file")
+    move = add("move", "Point a thread at new text after an edit moved or rewrote what it was on.")
+    move.add_argument("thread", type=int)
+    move.add_argument("--line", type=int, required=True, help="a source line in the block the thread belongs to now")
+    move.add_argument("--file", help="the file the block is in, if not the thread's current file")
+    move.add_argument("--quote", help="the rendered text (or diagram label) to highlight, if it changed")
     sub.add_parser("roots", help="List served roots that have feedback.", description="List served roots that have feedback.")
     args = parser.parse_args(argv)
 
@@ -1667,6 +1740,8 @@ def feedback_main(argv):
                 get_thread(conn, args.thread)
                 add_message(conn, args.thread, "agent", clean_body(text))
             print(f"Replied to thread {args.thread}.")
+        elif args.command == "move":
+            feedback_move(root, args.thread, args.file, args.line, args.quote)
     except ValueError as err:
         sys.exit(str(err))
     except KeyboardInterrupt:
@@ -1734,6 +1809,33 @@ def format_batch(conn, root, batch_id):
     return "\n".join(out)
 
 
+def feedback_move(root, thread_id, file, line, quote):
+    """Re-points a thread at a source line. The page turns that into a full anchor the next time it renders the file.
+
+    Only the page knows the rendered text and block boundaries, so this stores the line and leaves the rest pending.
+    """
+    with feedback_db(root, create=False) as conn:
+        thread = get_thread(conn, thread_id)
+        target = (root / file).resolve() if file else root / thread["file"]
+        if not target.is_relative_to(root) or not target.is_file():
+            raise ValueError(f"no such file under {root}: {file}")
+        count = len(target.read_text().splitlines())
+        if not 1 <= line <= count:
+            raise ValueError(f"line {line} is outside {target} (1-{count})")
+        kind = thread["kind"] or ("text" if thread["quote"] else "block")
+        if quote is not None and kind == "block":
+            raise ValueError(f"thread {thread_id} is on a whole block, so it has no quote to change")
+        quote = thread["quote"] if quote is None else quote.strip()
+        if kind != "block" and not quote:
+            raise ValueError("the quote can't be empty")
+        conn.execute(
+            "UPDATE threads SET file = ?, quote = ?, prefix = '', suffix = '', line_start = ?, line_end = ?,"
+            " context = '', kind = ?, pending = 1 WHERE id = ?",
+            (target.relative_to(root).as_posix(), quote, line, line, kind, thread_id),
+        )
+    print(f"Moved thread {thread_id} to {target}:{line}. It re-anchors when the page next renders that file.")
+
+
 def feedback_show(root, include_resolved):
     with feedback_db(root, create=False) as conn:
         where = "1 = 1" if include_resolved else "t.status = 'open'"
@@ -1750,7 +1852,10 @@ def format_threads(root, threads, messages, batch_id):
     for t in threads:
         out.append(f"## Thread {t['id']} ({t['status']})")
         out.append(f"File: {root / t['file']}")
-        out.append(f"Lines when commented: {t['line_start']}-{t['line_end']}")
+        if t["pending"]:
+            out.append(f"Moved to line {t['line_start']}; the page hasn't re-anchored it yet")
+        else:
+            out.append(f"Lines when commented: {t['line_start']}-{t['line_end']}")
         quote = json.dumps(t["quote"], ensure_ascii=False)
         if t["kind"] == "diagram":
             out.append(f"Quote: {quote}, a label in the diagram below (line breaks in the label show as spaces)")
@@ -1758,8 +1863,9 @@ def format_threads(root, threads, messages, batch_id):
             out.append(f"Quote: {quote}")
         else:
             out.append("Quote: none; the comment is on the whole block")
-        out.append("Source when commented:")
-        out += ["    " + line for line in t["context"].splitlines() or [""]]
+        if t["context"]:
+            out.append("Source when commented:")
+            out += ["    " + line for line in t["context"].splitlines()]
         out.append("Messages:")
         for m in messages.get(t["id"], []):
             if m["state"] == "draft":

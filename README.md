@@ -55,7 +55,7 @@ Each run listens on a port the OS picks, so several previews can run side by sid
 - **Drafts.** Comments start as drafts, like a pending GitHub review. Once there are drafts, a widget in the lower right offers **Submit feedback**, which sends every draft under the root as one batch.
 - **Threads.** The comments panel (`c` with nothing selected, or the 💬 button) lists the page's threads. The agent's replies appear there, and you reply in the same thread. You resolve threads; the agent never does.
 - **Agent status.** The widget and panel show whether an agent is listening, working on a batch, or absent. Submitting with no agent listening is fine: the batch waits for one.
-- **Outdated comments.** A comment stays attached to its text through edits that move it. If the quoted text itself is gone, usually because the agent reworded it, the thread is marked outdated and stays in the panel.
+- **Outdated comments.** A comment stays attached to its text through edits that move it. If the quoted text itself is gone, usually because the agent reworded it, the thread is marked outdated and stays in the panel. The agent can point it at the new text with `feedback move`, and the page re-anchors it on the next render, even in another file.
 
 The agent's side is a subcommand:
 
@@ -63,6 +63,7 @@ The agent's side is a subcommand:
 preview.py feedback wait --root ROOT       # block until you submit, claim the batch, print it
 preview.py feedback reply --root ROOT 7 "Reworded it."
 preview.py feedback show --root ROOT       # open threads
+preview.py feedback move --root ROOT 7 --line 42 [--file other.md] [--quote "new text"]
 preview.py feedback roots                  # roots with feedback, and whether an agent is listening
 ```
 

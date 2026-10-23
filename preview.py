@@ -602,12 +602,13 @@ function captureSelection() {
     line_end: lineEnd,
     context: sourceOf(lineStart, lineEnd),
     rect: rects[rects.length - 1] || range.getBoundingClientRect(),
+    range: range.cloneRange(),
   };
 }
 
 function captureBlock(el) {
   const lines = linesOf(el);
-  return { quote: '', prefix: '', suffix: '', ...lines, context: sourceOf(lines.line_start, lines.line_end), rect: el.getBoundingClientRect() };
+  return { quote: '', prefix: '', suffix: '', ...lines, context: sourceOf(lines.line_start, lines.line_end), el };
 }
 
 // Anchoring.
@@ -762,10 +763,14 @@ function buildUI() {
   ui.selButton = h('button', { class: 'gmp-sel', hidden: true, onmousedown: (e) => e.preventDefault(), onclick: () => {
     if (ui.pending) openComposer(ui.pending);
   } }, 'Comment');
+  // The composer lives in the panel rather than floating over the page, so writing a comment narrows the content
+  // instead of covering it. That matters in wide mode, where text runs to the edge of the window.
+  ui.panelHead = h('div');
   ui.composer = h('div', { class: 'gmp-composer', hidden: true });
-  ui.panel = h('aside', { id: 'gmp-panel' });
+  ui.cards = h('div');
+  ui.panel = h('aside', { id: 'gmp-panel' }, ui.panelHead, ui.composer, ui.cards);
   ui.widget = h('div', { id: 'gmp-widget', hidden: true });
-  document.body.append(ui.addButton, ui.selButton, ui.composer, ui.panel, ui.widget);
+  document.body.append(ui.addButton, ui.selButton, ui.panel, ui.widget);
 
   const article = document.querySelector('.markdown-body');
   article.addEventListener('mousemove', (e) => placeAddButton(article, e));
@@ -777,12 +782,12 @@ function buildUI() {
   });
 
   document.addEventListener('mouseup', (e) => {
-    if (ui.composer.contains(e.target) || ui.panel.contains(e.target) || e.target === ui.selButton) return;
+    if (ui.panel.contains(e.target) || e.target === ui.selButton) return;
     setTimeout(() => {
       ui.pending = captureSelection();
       if (!ui.pending) return (ui.selButton.hidden = true);
-      placeAt(ui.selButton, ui.pending.rect);
       ui.selButton.hidden = false;
+      placeAt(ui.selButton, ui.pending.rect);
     });
   });
   document.addEventListener('selectionchange', () => {
@@ -804,13 +809,16 @@ function buildUI() {
   });
 
   ui.panel.addEventListener('focusout', () => setTimeout(() => {
-    if (panelDirty && !ui.panel.contains(document.activeElement)) renderPanel();
+    if (panelDirty && !ui.cards.contains(document.activeElement)) renderPanel();
   }));
 }
 
+// Places el below rect, kept clear of the window's right edge and of the panel. el must be visible to have a width.
 function placeAt(el, rect) {
+  const panel = document.body.classList.contains('gmp-panel-open') ? PANEL_WIDTH : 0;
+  const maxLeft = document.documentElement.clientWidth - panel - el.offsetWidth - 16;
   el.style.top = rect.bottom + window.scrollY + 6 + 'px';
-  el.style.left = Math.min(rect.right + window.scrollX, window.scrollX + document.documentElement.clientWidth - 120) + 'px';
+  el.style.left = Math.max(0, Math.min(rect.right, maxLeft)) + window.scrollX + 'px';
 }
 
 function placeAddButton(article, e) {
@@ -832,47 +840,64 @@ function placeAddButton(article, e) {
 
 function openComposer(anchor) {
   ui.selButton.hidden = true;
+  ui.closeComposer?.(false);
+  const wasOpen = document.body.classList.contains('gmp-panel-open');
   const input = h('textarea', { rows: 4, placeholder: 'Leave a comment' });
+  // A cancelled comment puts the panel back the way it was. A saved one leaves it open on the new thread.
+  const close = (saved) => {
+    ui.closeComposer = null;
+    ui.composer.hidden = true;
+    ui.composer.replaceChildren();
+    setPending(null);
+    if (!saved && !wasOpen) setPanel(false);
+  };
   const save = async () => {
     const body = input.value.trim();
     if (!body) return;
-    const { rect, ...fields } = anchor;
+    const { rect, range, el, ...fields } = anchor;
     const out = await api('thread', { path: ctx.path, body, ...fields });
     if (!out) return;
-    close();
+    close(true);
     getSelection().removeAllRanges();
     activeId = out.thread_id;
     paint();
-  };
-  const close = () => {
-    ui.composer.hidden = true;
-    document.removeEventListener('mousedown', outside, true);
-  };
-  const outside = (e) => {
-    if (!ui.composer.contains(e.target) && !input.value.trim()) close();
+    renderPanel();
   };
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save();
-    if (e.key === 'Escape') close();
+    if (e.key === 'Escape') close(false);
   });
   const preview = anchor.quote
     ? h('blockquote', {}, truncate(anchor.quote, 160))
     : h('div', { class: 'gmp-lines' }, `Lines ${anchor.line_start}–${anchor.line_end}`);
   ui.composer.replaceChildren(
+    h('div', { class: 'gmp-composer-title' }, 'New comment'),
     preview,
     input,
     h('div', { class: 'gmp-actions' },
       h('span', { class: 'gmp-hint' }, '⌘↵ to save'),
-      h('button', { onclick: close }, 'Cancel'),
+      h('button', { onclick: () => close(false) }, 'Cancel'),
       h('button', { class: 'gmp-primary', onclick: save }, 'Comment')),
   );
-  placeAt(ui.composer, anchor.rect);
+  ui.closeComposer = close;
   ui.composer.hidden = false;
-  document.addEventListener('mousedown', outside, true);
+  setPending(anchor);
+  setPanel(true);
+  ui.panel.scrollTop = 0;
   input.focus();
 }
 
+// Marks what the open composer is about, since focusing the textarea takes the page selection away.
+function setPending(anchor) {
+  document.querySelectorAll('.gmp-block-pending').forEach((e) => e.classList.remove('gmp-block-pending'));
+  if (window.CSS?.highlights) CSS.highlights.delete('gmp-pending');
+  if (!anchor) return;
+  if (anchor.range && window.Highlight) CSS.highlights.set('gmp-pending', new Highlight(anchor.range));
+  if (anchor.el) anchor.el.classList.add('gmp-block-pending');
+}
+
 function setPanel(open) {
+  if (!open) ui.closeComposer?.(true);
   document.body.classList.toggle('gmp-panel-open', open);
   ctx.store.set('gmp.panel', open);
   ui.toolsButton.setAttribute('aria-pressed', String(open));
@@ -898,7 +923,7 @@ function agentStatus() {
 }
 
 function renderPanel() {
-  if (ui.panel.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA') {
+  if (ui.cards.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA') {
     panelDirty = true;
     return;
   }
@@ -908,12 +933,14 @@ function renderPanel() {
   const shown = state.threads.filter((t) => showResolved || t.status === 'open' || t.id === activeId);
   const [dot, status] = agentStatus();
   const resolvedCount = state.threads.length - open.length;
-  ui.panel.replaceChildren(
+  ui.panelHead.replaceChildren(
     h('header', {},
       h('strong', {}, 'Comments'),
       h('label', {}, h('input', { type: 'checkbox', checked: showResolved, onchange: (e) => { showResolved = e.target.checked; renderPanel(); } }), ` Resolved (${resolvedCount})`),
       h('button', { class: 'gmp-close', title: 'Close (c)', onclick: () => setPanel(false) }, '×')),
     h('div', { class: 'gmp-status' }, h('span', { class: 'gmp-dot gmp-' + dot }), status),
+  );
+  ui.cards.replaceChildren(
     ...(shown.length ? shown.map(renderCard) : [h('p', { class: 'gmp-empty' }, 'No comments on this page. Select text and press c, or use the + beside a block.')]),
   );
 }
@@ -978,6 +1005,9 @@ function injectStyle() {
   document.head.append(h('style', {}, `
     ::highlight(gmp-comment) { background-color: rgba(212, 167, 44, 0.3); }
     ::highlight(gmp-active) { background-color: rgba(212, 167, 44, 0.65); }
+    ::highlight(gmp-pending) { background-color: rgba(84, 174, 255, 0.4); }
+    .gmp-block-pending { box-shadow: -6px 0 0 var(--accent); }
+    #gmp-widget[hidden], .gmp-add[hidden], .gmp-sel[hidden], .gmp-composer[hidden] { display: none; }
     .gmp-block { box-shadow: -6px 0 0 rgba(212, 167, 44, 0.55); }
     .gmp-block-active { box-shadow: -6px 0 0 rgba(212, 167, 44, 1); background-color: rgba(212, 167, 44, 0.12); }
     body.gmp-panel-open main { margin-right: ${PANEL_WIDTH}px; }
@@ -1019,10 +1049,8 @@ function injectStyle() {
     }
     button.gmp-primary { color: #fff; background: #1f883d; border-color: #1f883d; }
     .gmp-hint { color: var(--muted); font-size: 11px; margin-right: auto; }
-    .gmp-composer {
-      position: absolute; z-index: 3; width: 360px; box-sizing: border-box; padding: 10px; background: var(--bg);
-      border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-    }
+    .gmp-composer { background: var(--bg); border: 1px solid var(--accent); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+    .gmp-composer-title { font-weight: 600; font-size: 12px; margin-bottom: 8px; }
     .gmp-sel { position: absolute; z-index: 3; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); }
     .gmp-add {
       position: absolute; z-index: 1; width: 22px; height: 22px; padding: 0; line-height: 20px; font-size: 15px;

@@ -382,6 +382,29 @@ function findDir(p) {
   return node;
 }
 
+// The common build of highlight.js leaves out many languages, protobuf among them, so load the ones a page asks for.
+const HLJS_LANGUAGES = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/es/languages/';
+const LANGUAGE_ALIASES = { proto: 'protobuf', docker: 'dockerfile', ps1: 'powershell' };
+const triedLanguages = new Set();
+
+async function loadLanguages(codes) {
+  const wanted = new Set();
+  for (const code of codes) {
+    const lang = [...code.classList].find((c) => c.startsWith('language-'))?.slice('language-'.length).toLowerCase();
+    if (!lang || hljs.getLanguage(lang)) continue;
+    const name = LANGUAGE_ALIASES[lang] || lang;
+    if (/^[a-z0-9-]+$/.test(name) && !triedLanguages.has(name)) wanted.add(name);
+  }
+  await Promise.all([...wanted].map(async (name) => {
+    triedLanguages.add(name);
+    try {
+      hljs.registerLanguage(name, (await import(HLJS_LANGUAGES + name + '.min.js')).default);
+    } catch (_) {
+      // Not a language highlight.js has. The block renders plain.
+    }
+  }));
+}
+
 async function render() {
   const content = document.getElementById('content');
   if (kind === 'dir') {
@@ -403,7 +426,9 @@ async function render() {
     div.textContent = code.textContent;
     code.parentElement.replaceWith(div);
   });
-  content.querySelectorAll('pre > code').forEach((code) => hljs.highlightElement(code));
+  const codes = [...content.querySelectorAll('pre > code')];
+  await loadLanguages(codes);
+  codes.forEach((code) => hljs.highlightElement(code));
 
   for (const [i, div] of [...content.querySelectorAll('.mermaid')].entries()) {
     try {

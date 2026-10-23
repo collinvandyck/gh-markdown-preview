@@ -71,6 +71,20 @@ preview.py feedback roots                  # roots with feedback, and whether an
 
 Comments live in a sqlite database per served root, under `~/.config/gh-markdown-preview/feedback/`, so separate worktrees keep separate threads and resolved threads stay on record.
 
+### Claude Code skill
+
+[`skills/mdp-feedback/SKILL.md`](skills/mdp-feedback/SKILL.md) teaches Claude Code the whole loop: start the preview, wait for a batch, make the edits, reply on each thread, re-point threads with `feedback move`, and wait again. Ask it to "open these docs for review" and it takes it from there.
+
+To install it, copy the folder into your skills directory and point it at your clone:
+
+```sh
+mkdir -p ~/.claude/skills
+cp -r ~/code/gh-markdown-preview/skills/mdp-feedback ~/.claude/skills/
+sed -i '' "s#/path/to/gh-markdown-preview#$HOME/code/gh-markdown-preview#g" ~/.claude/skills/mdp-feedback/SKILL.md
+```
+
+(On Linux, drop the `''` after `-i`.) The skill calls the script by its absolute path, so one allow rule in your Claude Code settings keeps the loop from prompting, for example `"Bash(/Users/you/code/gh-markdown-preview/preview.py feedback:*)"` along with `"Bash(python3:*)"` for starting the server.
+
 ## Keyboard
 
 | Key | Does |

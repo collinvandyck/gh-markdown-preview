@@ -27,6 +27,7 @@ mdp docs/architecture.md     # open one file
 mdp docs/                    # open the folder's README or index, or a listing if it has neither
 mdp ~/code/gh-markdown-preview/example   # the example docs
 mdp . --port 6500 --no-open  # fixed port, don't open the browser
+mdp docs/ --feedback         # collect comments for an agent (see below)
 ```
 
 The served root defaults to the git toplevel of the path, so links that climb out of the folder you opened (`../other.md`) still resolve and the tree shows the whole repo. Pass `--root DIR` to serve something narrower or wider.
@@ -45,6 +46,29 @@ Each run listens on a port the OS picks, so several previews can run side by sid
 - **Live reload.** The page checks for changes every second and re-renders in place, keeping your scroll position. A folder listing page also picks up added or removed files. The sidebar tree refreshes on the next page load.
 - **Remembered layout.** Theme, wide mode, sidebar width, and whether the sidebar is hidden persist across pages and runs. Open folders and the sidebar's scroll position are remembered per served root. They're saved in `~/.config/gh-markdown-preview/prefs.json` (or under `$XDG_CONFIG_HOME`), not in browser storage, because browser storage is tied to the port and the port changes every run.
 
+## Feedback for an agent
+
+`mdp --feedback` turns the preview into a review tool for a coding agent such as Claude Code. You comment on the rendered page, the agent edits the markdown, and live reload shows the result.
+
+- **Comment.** Select text and press `c` (or click **Comment**), or hover a block and click the **+** in the left margin to comment on the whole block, which is the way to comment on a Mermaid diagram.
+- **Drafts.** Comments start as drafts, like a pending GitHub review. Once there are drafts, a widget in the lower right offers **Submit feedback**, which sends every draft under the root as one batch.
+- **Threads.** The comments panel (`c` with nothing selected, or the 💬 button) lists the page's threads. The agent's replies appear there, and you reply in the same thread. You resolve threads; the agent never does.
+- **Agent status.** The widget and panel show whether an agent is listening, working on a batch, or absent. Submitting with no agent listening is fine: the batch waits for one.
+- **Outdated comments.** A comment stays attached to its text through edits that move it. If the quoted text itself is gone, usually because the agent reworded it, the thread is marked outdated and stays in the panel.
+
+The agent's side is a subcommand:
+
+```sh
+preview.py feedback wait --root ROOT       # block until you submit, claim the batch, print it
+preview.py feedback reply --root ROOT 7 "Reworded it."
+preview.py feedback show --root ROOT       # open threads
+preview.py feedback roots                  # roots with feedback, and whether an agent is listening
+```
+
+`wait` prints each thread's file, line range, quoted text, the source lines as they were when you commented, and the conversation so far, followed by the commands to reply and to wait again. An agent runs `wait` in the background, makes the edits when it exits, replies, and starts the next `wait`. ROOT defaults to the git toplevel of the current directory, and the server prints the exact command at startup.
+
+Comments live in a sqlite database per served root, under `~/.config/gh-markdown-preview/feedback/`, so separate worktrees keep separate threads and resolved threads stay on record.
+
 ## Keyboard
 
 | Key | Does |
@@ -55,12 +79,16 @@ Each run listens on a port the OS picks, so several previews can run side by sid
 | `\` | Show or hide the sidebar |
 | `t` | Cycle the theme: auto, light, dark |
 | `w` | Toggle wide mode |
+| `c` | With `--feedback`: comment on the selection, or show or hide the comments panel |
+| `⌘↵` / `Ctrl+↵` (in a comment) | Save the comment |
 
 Drag the sidebar's lower-right corner to resize it.
 
 ## Security
 
 The server binds to 127.0.0.1 and refuses any path outside the served root. It serves other files under the root as-is, so images and other assets referenced by your markdown load normally.
+
+With `--feedback`, an agent acts on whatever lands in the comment database, so the feedback endpoints only accept requests that carry a token the server generates at startup and embeds in its own pages, and only on a `127.0.0.1` or `localhost` Host header. Other sites open in your browser can't read the token or set the header, so they can't post comments, and DNS rebinding doesn't get past the Host check.
 
 ## Differences from GitHub
 

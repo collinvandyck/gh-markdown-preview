@@ -461,9 +461,20 @@ async function poll() {
   setTimeout(poll, 1000);
 }
 
+// The page renders after it loads, so when you come back to it the browser restores scroll on an empty page and lands
+// at the top. Keep the position in the history entry instead, and restore it after the first render.
+let scrollTimer = null;
+const saveScroll = () => history.replaceState({ ...history.state, y: window.scrollY }, '');
+window.addEventListener('scroll', () => {
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(saveScroll, 200);
+}, { passive: true });
+window.addEventListener('pagehide', saveScroll);
+
 await loadTree();
 await render();
-if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+if (history.state?.y != null) window.scrollTo(0, history.state.y);
+else if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
 poll();
 </script>
 </body>

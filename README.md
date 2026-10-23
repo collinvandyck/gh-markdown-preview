@@ -50,7 +50,8 @@ Each run listens on a port the OS picks, so several previews can run side by sid
 
 `mdp --feedback` turns the preview into a review tool for a coding agent such as Claude Code. You comment on the rendered page, the agent edits the markdown, and live reload shows the result.
 
-- **Comment.** Select text and press `c` (or click **Comment**), or hover a block and click the **+** in the left margin to comment on the whole block, which is the way to comment on a Mermaid diagram.
+- **Comment.** Select text and press `c` (or click **Comment**), or hover a block and click the **+** in the left margin to comment on the whole block.
+- **Diagrams.** In a Mermaid diagram, click a node, an edge label, a subgraph title, or a sequence diagram message, then press `c` or click **Comment**. Selecting text inside a label does the same. The comment attaches to that label and glows on the diagram, and the agent gets the label text along with the diagram's source. The **+** still comments on the whole diagram.
 - **Drafts.** Comments start as drafts, like a pending GitHub review. Once there are drafts, a widget in the lower right offers **Submit feedback**, which sends every draft under the root as one batch.
 - **Threads.** The comments panel (`c` with nothing selected, or the 💬 button) lists the page's threads. The agent's replies appear there, and you reply in the same thread. You resolve threads; the agent never does.
 - **Agent status.** The widget and panel show whether an agent is listening, working on a batch, or absent. Submitting with no agent listening is fine: the batch waits for one.

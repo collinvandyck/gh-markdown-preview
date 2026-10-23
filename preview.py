@@ -40,6 +40,9 @@ FEEDBACK_DIR = CONFIG_DIR / "feedback"
 # Open folders and sidebar scroll only make sense for the tree they were saved against. Everything else is global.
 ROOT_PREFS = {"gmp.open", "gmp.scroll"}
 PREFS_LOCK = threading.Lock()
+# What a thread is attached to: selected prose, a whole block, or one label in a Mermaid diagram. Threads saved before
+# kind existed have "", which means text if the thread has a quote and block if it doesn't.
+THREAD_KINDS = ("", "text", "block", "diagram")
 # A waiting agent refreshes its heartbeat every HEARTBEAT_EVERY seconds. The page treats an older one as gone.
 HEARTBEAT_EVERY = 5
 HEARTBEAT_FRESH = 15
@@ -56,6 +59,7 @@ CREATE TABLE IF NOT EXISTS threads (
   line_start INTEGER NOT NULL,
   line_end INTEGER NOT NULL,
   context TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'open',
   created_at REAL NOT NULL
 );
@@ -590,13 +594,18 @@ function captureSelection() {
   const end = pointOffset(range.endContainer, range.endOffset);
   const { text } = textIndex();
   const quote = text.slice(start, end);
-  if (!quote.trim()) return null;
+  if (!quote.trim()) {
+    // The text index skips diagrams, so a selection inside one comes back empty. Anchor to its label instead.
+    const label = labelOf(range.startContainer);
+    return label ? captureLabel(label) : null;
+  }
   const first = linesOf(blockOf(charPoint(start)[0]));
   const last = linesOf(blockOf(charPoint(end - 1)[0]));
   const lineStart = Math.min(first.line_start, last.line_start);
   const lineEnd = Math.max(first.line_end, last.line_end);
   const rects = range.getClientRects();
   return {
+    kind: 'text',
     quote,
     prefix: text.slice(Math.max(0, start - 32), start),
     suffix: text.slice(end, end + 32),
@@ -610,14 +619,59 @@ function captureSelection() {
 
 function captureBlock(el) {
   const lines = linesOf(el);
-  return { quote: '', prefix: '', suffix: '', ...lines, context: sourceOf(lines.line_start, lines.line_end), el };
+  return { kind: 'block', quote: '', prefix: '', suffix: '', ...lines, context: sourceOf(lines.line_start, lines.line_end), el };
 }
+
+// Diagram labels.
+//
+// A comment on a diagram quotes one label: a node, an edge label, a subgraph title, or a piece of sequence diagram text.
+// Its context is the whole diagram's source, which is where the agent edits the label.
+
+const LABEL_SELECTOR = 'g.node, g.edgeLabel, g.cluster, text';
+
+function labelOf(node) {
+  const el = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  const label = el?.closest(LABEL_SELECTOR);
+  return label && label.closest('.mermaid') && content?.contains(label) && labelText(label) ? label : null;
+}
+
+// Joins the label's text nodes with spaces, so a <br/> or a new tspan reads as a space, the way the source wrote it.
+function labelText(el) {
+  const parts = [];
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement.closest('style') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  while (walker.nextNode()) parts.push(walker.currentNode.data);
+  return parts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+function captureLabel(el) {
+  const lines = linesOf(el.closest('.mermaid'));
+  return {
+    kind: 'diagram',
+    quote: labelText(el),
+    prefix: '',
+    suffix: '',
+    ...lines,
+    context: sourceOf(lines.line_start, lines.line_end),
+    rect: el.getBoundingClientRect(),
+    el,
+  };
+}
+
+function captureLabelAt(target) {
+  const label = labelOf(target);
+  return label ? captureLabel(label) : null;
+}
+
+const threadKind = (t) => t.kind || (t.quote ? 'text' : 'block');
 
 // Anchoring.
 //
 // A text comment re-anchors to the occurrence of its quote whose surrounding text best matches what surrounded it when
-// it was made. A block comment re-anchors to the block whose source is unchanged. A comment that finds neither is
-// outdated: it stays in the panel but has nothing to highlight.
+// it was made. A block comment re-anchors to the block whose source is unchanged. A diagram comment re-anchors to the
+// label with the same text, preferring the diagram it was made on. A comment that finds none of these is outdated: it
+// stays in the panel but has nothing to highlight.
 
 function anchorAll() {
   anchors = new Map();
@@ -626,7 +680,9 @@ function anchorAll() {
 }
 
 function locate(t) {
-  if (!t.quote) {
+  const kind = threadKind(t);
+  if (kind === 'diagram') return locateLabel(t);
+  if (kind === 'block') {
     const el = [...content.querySelectorAll('[data-src]')].find((e) => {
       const lines = linesOf(e);
       return sourceOf(lines.line_start, lines.line_end) === t.context;
@@ -647,6 +703,24 @@ function locate(t) {
   return range ? { range, el: blockOf(range.startContainer) } : null;
 }
 
+// Tries the diagram whose source is unchanged first, then the rest by distance from where the comment was made, since
+// an edit to any other label in the same diagram changes its source.
+function locateLabel(t) {
+  const rank = (d) => {
+    const lines = linesOf(d);
+    return [sourceOf(lines.line_start, lines.line_end) === t.context ? 0 : 1, Math.abs(lines.line_start - t.line_start)];
+  };
+  const diagrams = [...content.querySelectorAll('.mermaid')]
+    .map((d) => [rank(d), d])
+    .sort(([a], [b]) => a[0] - b[0] || a[1] - b[1])
+    .map(([, d]) => d);
+  for (const d of diagrams) {
+    const el = [...d.querySelectorAll(LABEL_SELECTOR)].find((l) => labelText(l) === t.quote);
+    if (el) return { el, label: true };
+  }
+  return null;
+}
+
 function sharedPrefix(a, b) {
   let n = 0;
   while (n < a.length && n < b.length && a[n] === b[n]) n++;
@@ -662,7 +736,7 @@ function sharedSuffix(a, b) {
 const highlighted = (t) => t.status === 'open' || t.id === activeId;
 
 function paint() {
-  document.querySelectorAll('.gmp-block').forEach((e) => e.classList.remove('gmp-block', 'gmp-block-active'));
+  document.querySelectorAll('.gmp-block, .gmp-label').forEach((e) => e.classList.remove('gmp-block', 'gmp-block-active', 'gmp-label', 'gmp-label-active'));
   const normal = [];
   const active = [];
   for (const t of state.threads) {
@@ -671,8 +745,9 @@ function paint() {
     if (a.range) {
       (t.id === activeId ? active : normal).push(a.range);
     } else {
-      a.el.classList.add('gmp-block');
-      if (t.id === activeId) a.el.classList.add('gmp-block-active');
+      const cls = a.label ? 'gmp-label' : 'gmp-block';
+      a.el.classList.add(cls);
+      if (t.id === activeId) a.el.classList.add(cls + '-active');
     }
   }
   if (window.CSS?.highlights && window.Highlight) {
@@ -787,14 +862,17 @@ function buildUI() {
   document.addEventListener('mouseup', (e) => {
     if (ui.panel.contains(e.target) || e.target === ui.selButton) return;
     setTimeout(() => {
-      ui.pending = captureSelection();
+      document.querySelectorAll('.gmp-label-picked').forEach((el) => el.classList.remove('gmp-label-picked'));
+      ui.pending = captureSelection() || captureLabelAt(e.target);
       if (!ui.pending) return (ui.selButton.hidden = true);
+      if (ui.pending.kind === 'diagram') ui.pending.el.classList.add('gmp-label-picked');
       ui.selButton.hidden = false;
       placeAt(ui.selButton, ui.pending.rect);
     });
   });
   document.addEventListener('selectionchange', () => {
-    if (getSelection().isCollapsed) ui.selButton.hidden = true;
+    // Clicking a diagram label collapses the selection too, and that click is what picked the label.
+    if (getSelection().isCollapsed && ui.pending?.kind !== 'diagram') ui.selButton.hidden = true;
   });
 
   document.getElementById('content').addEventListener('click', (e) => {
@@ -807,7 +885,7 @@ function buildUI() {
     if (['INPUT', 'TEXTAREA'].includes(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key !== 'c') return;
     e.preventDefault();
-    const sel = captureSelection();
+    const sel = captureSelection() || (ui.selButton.hidden ? null : ui.pending);
     sel ? openComposer(sel) : setPanel(!document.body.classList.contains('gmp-panel-open'));
   });
 
@@ -889,11 +967,12 @@ function openComposer(anchor) {
 
 // Marks what the open composer is about, since focusing the textarea takes the page selection away.
 function setPending(anchor) {
-  document.querySelectorAll('.gmp-block-pending').forEach((e) => e.classList.remove('gmp-block-pending'));
+  document.querySelectorAll('.gmp-block-pending, .gmp-label-pending, .gmp-label-picked')
+    .forEach((e) => e.classList.remove('gmp-block-pending', 'gmp-label-pending', 'gmp-label-picked'));
   if (window.CSS?.highlights) CSS.highlights.delete('gmp-pending');
   if (!anchor) return;
   if (anchor.range && window.Highlight) CSS.highlights.set('gmp-pending', new Highlight(anchor.range));
-  if (anchor.el) anchor.el.classList.add('gmp-block-pending');
+  if (anchor.el) anchor.el.classList.add(anchor.kind === 'diagram' ? 'gmp-label-pending' : 'gmp-block-pending');
 }
 
 function setPanel(open) {
@@ -973,7 +1052,7 @@ function renderCard(t) {
     });
     footer = [input, h('div', { class: 'gmp-actions' },
       h('button', { onclick: reply }, 'Reply'),
-      h('button', { onclick: () => api('status', { thread_id: t.id, status: 'resolved' }) }, 'Resolve'))];
+      h('button', { onclick: () => resolve(t.id) }, 'Resolve'))];
   } else {
     footer = h('div', { class: 'gmp-actions' }, h('button', { onclick: () => api('status', { thread_id: t.id, status: 'open' }) }, 'Reopen'));
   }
@@ -985,7 +1064,16 @@ function renderCard(t) {
 }
 
 // The quoted text, or for a whole-block comment, the start of the block's source.
+// The panel keeps the active thread on screen even when resolved, so resolving it has to let go of it.
+function resolve(id) {
+  if (activeId === id) activeId = null;
+  return api('status', { thread_id: id, status: 'resolved' });
+}
+
 function anchorPreview(a, n) {
+  if (threadKind(a) === 'diagram') {
+    return h('blockquote', {}, h('span', { class: 'gmp-lines' }, `Diagram label, lines ${a.line_start}–${a.line_end}`), truncate(a.quote, n));
+  }
   if (a.quote) return h('blockquote', {}, truncate(a.quote, n));
   return h('blockquote', {}, h('span', { class: 'gmp-lines' }, `Whole block, lines ${a.line_start}–${a.line_end}`), truncate(a.context, n));
 }
@@ -1018,6 +1106,10 @@ function injectStyle() {
     ::highlight(gmp-active) { background-color: rgba(212, 167, 44, 0.65); }
     ::highlight(gmp-pending) { background-color: rgba(84, 174, 255, 0.4); }
     .gmp-block-pending { box-shadow: -6px 0 0 var(--accent); }
+    .mermaid :is(g.node, g.edgeLabel, g.cluster, text) { cursor: pointer; }
+    .gmp-label { filter: drop-shadow(0 0 2px rgba(212, 167, 44, 1)) drop-shadow(0 0 3px rgba(212, 167, 44, 0.8)); }
+    .gmp-label-active { filter: drop-shadow(0 0 3px rgba(212, 167, 44, 1)) drop-shadow(0 0 6px rgba(212, 167, 44, 1)); }
+    .gmp-label-picked, .gmp-label-pending { filter: drop-shadow(0 0 3px rgba(84, 174, 255, 1)) drop-shadow(0 0 5px rgba(84, 174, 255, 0.9)); }
     #gmp-widget[hidden], .gmp-add[hidden], .gmp-sel[hidden], .gmp-composer[hidden], .gmp-panel-submit[hidden] { display: none; }
     .gmp-panel-submit {
       display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;
@@ -1183,13 +1275,16 @@ class Handler(SimpleHTTPRequestHandler):
         file = self.rel_file(body["path"])
         text = clean_body(body["body"])
         fields = {k: str(body.get(k, "")) for k in ("quote", "prefix", "suffix", "context")}
+        kind = str(body.get("kind", ""))
+        if kind not in THREAD_KINDS:
+            raise ValueError(f"unknown kind {kind!r}")
         lines = (int(body["line_start"]), int(body["line_end"]))
         now = time.time()
         with transaction(conn):
             thread_id = conn.execute(
-                "INSERT INTO threads (file, quote, prefix, suffix, line_start, line_end, context, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (file, fields["quote"], fields["prefix"], fields["suffix"], *lines, fields["context"], now),
+                "INSERT INTO threads (file, quote, prefix, suffix, line_start, line_end, context, kind, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (file, fields["quote"], fields["prefix"], fields["suffix"], *lines, fields["context"], kind, now),
             ).lastrowid
             add_message(conn, thread_id, "user", text)
         return {"thread_id": thread_id}
@@ -1371,10 +1466,23 @@ def feedback_db(root, create=True):
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(FEEDBACK_SCHEMA)
+        migrate_feedback(conn)
         conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('root', ?)", (str(root),))
         yield conn
     finally:
         conn.close()
+
+
+def migrate_feedback(conn):
+    """Brings a database made by an older version up to FEEDBACK_SCHEMA."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(threads)")}
+    if "kind" not in columns:
+        # An empty kind means "infer it": a thread with a quote is a text comment, one without is a block comment.
+        try:
+            conn.execute("ALTER TABLE threads ADD COLUMN kind TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError as err:
+            if "duplicate column" not in str(err):
+                raise
 
 
 @contextlib.contextmanager
@@ -1640,8 +1748,11 @@ def format_threads(root, threads, messages, batch_id):
         out.append(f"## Thread {t['id']} ({t['status']})")
         out.append(f"File: {root / t['file']}")
         out.append(f"Lines when commented: {t['line_start']}-{t['line_end']}")
-        if t["quote"]:
-            out.append("Quote: " + json.dumps(t["quote"], ensure_ascii=False))
+        quote = json.dumps(t["quote"], ensure_ascii=False)
+        if t["kind"] == "diagram":
+            out.append(f"Quote: {quote}, a label in the diagram below (line breaks in the label show as spaces)")
+        elif t["quote"]:
+            out.append(f"Quote: {quote}")
         else:
             out.append("Quote: none; the comment is on the whole block")
         out.append("Source when commented:")

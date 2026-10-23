@@ -590,19 +590,22 @@ function captureSelection() {
   if (!sel.rangeCount || sel.isCollapsed) return null;
   const range = sel.getRangeAt(0);
   if (!content.contains(range.commonAncestorContainer)) return null;
-  const start = pointOffset(range.startContainer, range.startOffset);
-  const end = pointOffset(range.endContainer, range.endOffset);
+  let start = pointOffset(range.startContainer, range.startOffset);
+  let end = pointOffset(range.endContainer, range.endOffset);
   const { text } = textIndex();
+  // A triple-click, or a drag past the end of a line, takes in the newline between blocks. That newline belongs to no
+  // block, so trim it, and any other edge whitespace, before mapping the selection to source lines.
+  while (start < end && /\s/.test(text[start])) start++;
+  while (end > start && /\s/.test(text[end - 1])) end--;
   const quote = text.slice(start, end);
-  if (!quote.trim()) {
+  if (!quote) {
     // The text index skips diagrams, so a selection inside one comes back empty. Anchor to its label instead.
     const label = labelOf(range.startContainer);
     return label ? captureLabel(label) : null;
   }
-  const first = linesOf(blockOf(charPoint(start)[0]));
-  const last = linesOf(blockOf(charPoint(end - 1)[0]));
-  const lineStart = Math.min(first.line_start, last.line_start);
-  const lineEnd = Math.max(first.line_end, last.line_end);
+  const spans = [start, end - 1].map((off) => linesOf(blockOf(charPoint(off)[0]))).filter((l) => l.line_start);
+  const lineStart = spans.length ? Math.min(...spans.map((l) => l.line_start)) : 0;
+  const lineEnd = spans.length ? Math.max(...spans.map((l) => l.line_end)) : 0;
   const rects = range.getClientRects();
   return {
     kind: 'text',
@@ -613,7 +616,7 @@ function captureSelection() {
     line_end: lineEnd,
     context: sourceOf(lineStart, lineEnd),
     rect: rects[rects.length - 1] || range.getBoundingClientRect(),
-    range: range.cloneRange(),
+    range: rangeFor(start, end) || range.cloneRange(),
   };
 }
 

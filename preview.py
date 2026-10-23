@@ -29,18 +29,43 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css"
-      media="(prefers-color-scheme: light)">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css"
-      media="(prefers-color-scheme: dark)">
+<link id="md-light" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown-light.min.css">
+<link id="md-dark" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5.5.1/github-markdown-dark.min.css">
+<link id="hl-light" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css">
+<link id="hl-dark" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css">
+<script>
+  // Runs before first paint so a stored theme or width never flashes the default.
+  window.gmpApplyTheme = function (mode) {
+    const media = {
+      auto: ['(prefers-color-scheme: light)', '(prefers-color-scheme: dark)'],
+      light: ['all', 'not all'],
+      dark: ['not all', 'all'],
+    }[mode];
+    for (const kind of ['md', 'hl']) {
+      document.getElementById(kind + '-light').media = media[0];
+      document.getElementById(kind + '-dark').media = media[1];
+    }
+    document.documentElement.dataset.theme = mode;
+  };
+  let gmpTheme = 'auto';
+  try { gmpTheme = JSON.parse(localStorage.getItem('gmp.theme')) || 'auto'; } catch (_) {}
+  window.gmpApplyTheme(['auto', 'light', 'dark'].includes(gmpTheme) ? gmpTheme : 'auto');
+  try { if (JSON.parse(localStorage.getItem('gmp.wide'))) document.documentElement.classList.add('wide'); } catch (_) {}
+</script>
 <style>
   :root {
+    color-scheme: light;
     --bg: #ffffff; --side-bg: #f6f8fa; --border: #d0d7de; --fg: #1f2328; --muted: #59636e;
     --hover: #eaeef2; --current: #ddf4ff; --accent: #0969da;
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117; --side-bg: #010409; --border: #30363d; --fg: #e6edf3; --muted: #9198a1;
+    --hover: #161b22; --current: #121d2f; --accent: #4493f8;
+  }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root[data-theme="auto"] {
+      color-scheme: dark;
       --bg: #0d1117; --side-bg: #010409; --border: #30363d; --fg: #e6edf3; --muted: #9198a1;
       --hover: #161b22; --current: #121d2f; --accent: #4493f8;
     }
@@ -76,12 +101,17 @@ PAGE = """<!doctype html>
   #tree a.file.current { background: var(--current); color: var(--accent); font-weight: 600; }
   #tree .empty { padding: 4px 18px; color: var(--muted); }
   main { flex: 1; min-width: 0; }
-  #toggle {
-    position: fixed; left: 8px; top: 8px; z-index: 1; padding: 2px 7px; font-size: 12px; cursor: pointer;
+  #toggle, #tools button {
+    padding: 2px 7px; font-size: 12px; cursor: pointer;
     color: var(--muted); background: var(--side-bg); border: 1px solid var(--border); border-radius: 6px;
   }
+  #toggle:hover, #tools button:hover { color: var(--fg); }
+  #toggle { position: fixed; left: 8px; top: 8px; z-index: 1; }
+  #tools { position: fixed; right: 16px; top: 8px; z-index: 1; display: flex; gap: 6px; }
+  #tools button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   body:not(.collapsed) #toggle { left: calc(var(--side-px, 300px) - 30px); }
-  .markdown-body { box-sizing: border-box; max-width: 1012px; margin: 0 auto; padding: 32px 45px; }
+  .markdown-body { box-sizing: border-box; max-width: 1012px; margin: 0 auto; padding: 40px 45px 32px; }
+  html.wide .markdown-body { max-width: none; }
   @media (max-width: 767px) { .markdown-body { padding: 16px; } #sidebar { display: none; } }
   .crumbs { font-size: 12px; margin-bottom: 16px; font-family: ui-monospace, monospace; color: var(--muted); }
   .mermaid { text-align: center; margin-bottom: 16px; }
@@ -97,6 +127,10 @@ PAGE = """<!doctype html>
   <div id="tree"></div>
 </nav>
 <button id="toggle" title="Toggle sidebar (\\)">&#9776;</button>
+<div id="tools">
+  <button id="theme" title="Cycle theme: auto, light, dark (t)"></button>
+  <button id="wide" title="Toggle wide mode (w)">&#8596; Wide</button>
+</div>
 <main>
   <article class="markdown-body">
     <div class="crumbs">__CRUMBS__</div>
@@ -111,8 +145,6 @@ import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.es
 
 const path = __PATH__;
 const kind = __KIND__;
-const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' });
 marked.use(gfmHeadingId());
 
 const store = {
@@ -208,8 +240,46 @@ function setCollapsed(collapsed) {
 }
 setCollapsed(store.get('gmp.collapsed', false));
 document.getElementById('toggle').addEventListener('click', () => setCollapsed(!document.body.classList.contains('collapsed')));
+// Theme and width.
+
+const themes = ['auto', 'light', 'dark'];
+const themeLabels = { auto: '\u25D0 Auto', light: '\u2600 Light', dark: '\u263E Dark' };
+const systemDark = window.matchMedia('(prefers-color-scheme: dark)');
+const isDark = () => {
+  const mode = document.documentElement.dataset.theme;
+  return mode === 'dark' || (mode === 'auto' && systemDark.matches);
+};
+
+function setTheme(mode) {
+  window.gmpApplyTheme(mode);
+  store.set('gmp.theme', mode);
+  document.getElementById('theme').textContent = themeLabels[mode];
+}
+setTheme(document.documentElement.dataset.theme);
+const cycleTheme = () => {
+  const next = themes[(themes.indexOf(document.documentElement.dataset.theme) + 1) % themes.length];
+  const before = isDark();
+  setTheme(next);
+  if (isDark() !== before) render();
+};
+document.getElementById('theme').addEventListener('click', cycleTheme);
+systemDark.addEventListener('change', () => {
+  if (document.documentElement.dataset.theme === 'auto') render();
+});
+
+function setWide(wide) {
+  document.documentElement.classList.toggle('wide', wide);
+  document.getElementById('wide').setAttribute('aria-pressed', String(wide));
+  store.set('gmp.wide', wide);
+}
+setWide(document.documentElement.classList.contains('wide'));
+const toggleWide = () => setWide(!document.documentElement.classList.contains('wide'));
+document.getElementById('wide').addEventListener('click', toggleWide);
+
 document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 't') cycleTheme();
+  if (e.key === 'w') toggleWide();
   if (e.key === '\\\\') setCollapsed(!document.body.classList.contains('collapsed'));
   if (e.key === '/') { e.preventDefault(); setCollapsed(false); document.getElementById('filter').focus(); }
 });
@@ -244,7 +314,10 @@ async function render() {
   }
 
   const res = await fetch(path + '?raw=1', { cache: 'no-store' });
-  content.innerHTML = marked.parse(await res.text());
+  const md = await res.text();
+  const y = window.scrollY;
+  content.innerHTML = marked.parse(md);
+  mermaid.initialize({ startOnLoad: false, theme: isDark() ? 'dark' : 'default' });
 
   content.querySelectorAll('pre > code.language-mermaid').forEach((code) => {
     const div = document.createElement('div');
@@ -263,6 +336,7 @@ async function render() {
       div.textContent = 'Mermaid error: ' + err.message + '\\n\\n' + div.textContent;
     }
   }
+  window.scrollTo(0, y);
 }
 
 let mtime = null;

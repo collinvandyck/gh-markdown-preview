@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 MARKDOWN_SUFFIXES = (".md", ".markdown")
 SKIP_DIRS = {"node_modules", "vendor", "__pycache__", "dist", "build", "target"}
 MAX_TREE_FILES = 20000
+INDEX_NAMES = ["readme", "index"]
 
 PAGE = """<!doctype html>
 <html>
@@ -484,8 +485,20 @@ def markdown_files(root):
     return sorted(files)
 
 
+def sort_key(node):
+    name = node["name"].lower()
+    if "children" in node:
+        return (1, name)
+    if name.rsplit(".", 1)[0] in INDEX_NAMES:
+        return (0, INDEX_NAMES.index(name.rsplit(".", 1)[0]), name)
+    return (2, name)
+
+
 def build_tree(root):
-    """Builds a nested {name, path, children} tree of the markdown files under root. Directories sort first."""
+    """Builds a nested {name, path, children} tree of the markdown files under root.
+
+    Within a folder, a README or index file comes first, then subfolders, then the remaining files.
+    """
     top = {"name": root.name, "path": "/", "children": {}}
     for rel in markdown_files(root):
         node = top
@@ -499,7 +512,7 @@ def build_tree(root):
     def finish(node):
         if "children" not in node:
             return node
-        kids = sorted(node["children"].values(), key=lambda c: ("children" not in c, c["name"].lower()))
+        kids = sorted(node["children"].values(), key=sort_key)
         return {**node, "children": [finish(c) for c in kids]}
 
     return finish(top)

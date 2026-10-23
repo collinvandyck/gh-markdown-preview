@@ -24,7 +24,7 @@ Python 3.9 or newer is all it needs. Rendering happens in the browser with `mark
 ```sh
 mdp                          # preview the current directory
 mdp docs/architecture.md     # open one file
-mdp docs/                    # open the folder's README, or a listing if it has none
+mdp docs/                    # open the folder's README or index, or a listing if it has neither
 mdp ~/code/gh-markdown-preview/example   # the example docs
 mdp . --port 6500 --no-open  # pick a port, skip opening the browser
 ```

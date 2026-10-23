@@ -387,9 +387,9 @@ class Handler(SimpleHTTPRequestHandler):
         if target.is_dir():
             if not url.path.endswith("/"):
                 return self.redirect(self.url_for(target))
-            readme = target / "README.md"
-            if readme.is_file():
-                return self.redirect(self.url_for(readme))
+            landing = index_file(target)
+            if landing:
+                return self.redirect(self.url_for(landing))
             return self.send_page(target, "dir")
         if target.suffix.lower() in MARKDOWN_SUFFIXES and "raw" not in parse_qs(url.query):
             return self.send_page(target, "file")
@@ -483,6 +483,16 @@ def markdown_files(root):
                 if len(files) >= MAX_TREE_FILES:
                     return sorted(files)
     return sorted(files)
+
+
+def index_file(directory):
+    """Returns the folder's README or index markdown file, preferring README, or None."""
+    candidates = {}
+    for child in directory.iterdir():
+        stem, _, suffix = child.name.lower().rpartition(".")
+        if child.is_file() and "." + suffix in MARKDOWN_SUFFIXES and stem in INDEX_NAMES:
+            candidates.setdefault(INDEX_NAMES.index(stem), child)
+    return candidates[min(candidates)] if candidates else None
 
 
 def sort_key(node):

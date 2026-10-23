@@ -1,17 +1,67 @@
 # gh-markdown-preview
 
-Local preview of markdown with GitHub styling, Mermaid diagrams, syntax highlighting, and live reload. It's a single Python file with no dependencies beyond the standard library. Rendering happens in the browser with `marked`, `github-markdown-css`, `highlight.js`, and `mermaid`, all pinned and loaded from jsDelivr, so the browser needs network access.
+Preview a folder of markdown locally, the way GitHub would render it: GitHub's styling, Mermaid diagrams, syntax highlighting, a file tree, and live reload. It's one Python file with no dependencies beyond the standard library.
+
+![Light mode, with the file tree and a Mermaid flowchart](docs/screenshot-light.png)
+
+![Dark mode, showing a Mermaid sequence diagram](docs/screenshot-dark.png)
+
+The pages above come from [`example/`](example/README.md), a small fictional docs set kept in this repo for trying the previewer out.
+
+## Setup
+
+Clone the repo somewhere and alias the script. The rest of this README assumes the alias.
 
 ```sh
-./preview.py path/to/doc.md        # open one file
-./preview.py path/to/folder        # open the folder's README.md, or a listing
-./preview.py . --port 6500 --no-open
+git clone <this repo> ~/code/gh-markdown-preview
+echo "alias mdp=~/code/gh-markdown-preview/preview.py" >> ~/.zshrc
 ```
 
-The served root defaults to the git toplevel of the path, so relative links that climb out of the folder (`../task_processing.md`) still resolve. Pass `--root` to override it. The server binds to 127.0.0.1 and refuses paths outside the root.
+Python 3.9 or newer is all it needs. Rendering happens in the browser with `marked`, `github-markdown-css`, `highlight.js`, and `mermaid`, pinned and loaded from jsDelivr, so the browser needs network access.
 
-A sidebar shows every markdown file under the root as a collapsible tree (a folder's README or index first, then subfolders, then files), with the current file highlighted and its folders expanded. In a git repo the tree comes from `git ls-files`, so ignored files stay out; elsewhere it walks the directory and skips hidden folders, `node_modules`, `vendor`, and build output. Type in the filter box (or press `/`) to narrow the tree, and press Enter to open the first match. `\` or the ☰ button hides the sidebar. Drag its lower-right corner to resize it. The buttons in the top right cycle the theme (auto, light, dark; `t`) and toggle wide mode, which drops the 1012px content width cap (`w`). Theme, wide mode, open folders, sidebar width, and scroll position persist across pages.
+## Usage
 
-The page polls the server every second and re-renders in place when the file changes, keeping the scroll position.
+```sh
+mdp                          # preview the current directory
+mdp docs/architecture.md     # open one file
+mdp docs/                    # open the folder's README, or a listing if it has none
+mdp ~/code/gh-markdown-preview/example   # the example docs
+mdp . --port 6500 --no-open  # pick a port, skip opening the browser
+```
 
-Differences from GitHub: no GitHub alerts (`> [!NOTE]`), no emoji shortcodes, and no relative image rewriting beyond what the browser does on its own.
+The served root defaults to the git toplevel of the path, so links that climb out of the folder you opened (`../other.md`) still resolve and the tree shows the whole repo. Pass `--root DIR` to serve something narrower or wider. The default port is 6419.
+
+## Features
+
+- **GitHub rendering.** `github-markdown-css` styles, GitHub-flavored markdown (tables, task lists, strikethrough), and heading anchors with GitHub's IDs, so links like `page.md#some-heading` land where they would on GitHub.
+- **Mermaid.** Fenced `mermaid` blocks render as diagrams, in a theme that matches the page. A diagram that fails to parse shows the error and its source in place.
+- **Syntax highlighting** with `highlight.js` and GitHub's light and dark themes.
+- **File tree.** A sidebar lists every markdown file under the root. Each folder shows its README or index first, then subfolders, then files. The current file is highlighted and its folders open. In a git repo the tree comes from `git ls-files`, so ignored files stay out. Anywhere else it walks the directory and skips hidden folders, `node_modules`, `vendor`, and build output.
+- **Filter.** Type in the box above the tree to narrow it to matching paths. Enter opens the first match.
+- **Theme.** Cycle between auto (follows the system), light, and dark.
+- **Wide mode.** Drops GitHub's 1012px content width cap, which helps with wide tables and diagrams.
+- **Live reload.** The page checks for changes every second and re-renders in place, keeping your scroll position. A folder listing page also picks up added or removed files. The sidebar tree refreshes on the next page load.
+- **Remembered layout.** Theme, wide mode, open folders, sidebar width, and sidebar scroll position persist across pages and sessions.
+
+## Keyboard
+
+| Key | Does |
+|---|---|
+| `/` | Focus the file filter |
+| `Enter` (in the filter) | Open the first match |
+| `Esc` (in the filter) | Clear the filter |
+| `\` | Show or hide the sidebar |
+| `t` | Cycle the theme: auto, light, dark |
+| `w` | Toggle wide mode |
+
+Drag the sidebar's lower-right corner to resize it.
+
+## Security
+
+The server binds to 127.0.0.1 and refuses any path outside the served root. It serves other files under the root as-is, so images and other assets referenced by your markdown load normally.
+
+## Differences from GitHub
+
+- No GitHub alerts (`> [!NOTE]`), footnotes, or emoji shortcodes.
+- No math rendering.
+- Relative links resolve against the local file tree, not against a branch on github.com.

@@ -474,6 +474,8 @@ export function afterRender(el, md) {
   tagBlocks();
   index = null;
   anchorAll();
+  // The panel may have drawn before there was content to anchor to, which marks every thread outdated.
+  renderPanel();
 }
 
 // Source lines.
@@ -766,9 +768,10 @@ function buildUI() {
   // The composer lives in the panel rather than floating over the page, so writing a comment narrows the content
   // instead of covering it. That matters in wide mode, where text runs to the edge of the window.
   ui.panelHead = h('div');
+  ui.panelSubmit = h('div', { class: 'gmp-panel-submit', hidden: true });
   ui.composer = h('div', { class: 'gmp-composer', hidden: true });
   ui.cards = h('div');
-  ui.panel = h('aside', { id: 'gmp-panel' }, ui.panelHead, ui.composer, ui.cards);
+  ui.panel = h('aside', { id: 'gmp-panel' }, ui.panelHead, ui.panelSubmit, ui.composer, ui.cards);
   ui.widget = h('div', { id: 'gmp-widget', hidden: true });
   document.body.append(ui.addButton, ui.selButton, ui.panel, ui.widget);
 
@@ -867,12 +870,9 @@ function openComposer(anchor) {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) save();
     if (e.key === 'Escape') close(false);
   });
-  const preview = anchor.quote
-    ? h('blockquote', {}, truncate(anchor.quote, 160))
-    : h('div', { class: 'gmp-lines' }, `Lines ${anchor.line_start}–${anchor.line_end}`);
   ui.composer.replaceChildren(
     h('div', { class: 'gmp-composer-title' }, 'New comment'),
-    preview,
+    anchorPreview(anchor, 160),
     input,
     h('div', { class: 'gmp-actions' },
       h('span', { class: 'gmp-hint' }, '⌘↵ to save'),
@@ -901,6 +901,7 @@ function setPanel(open) {
   document.body.classList.toggle('gmp-panel-open', open);
   ctx.store.set('gmp.panel', open);
   ui.toolsButton.setAttribute('aria-pressed', String(open));
+  renderWidget();
 }
 
 function focusThread(id, scroll) {
@@ -947,7 +948,7 @@ function renderPanel() {
 
 function renderCard(t) {
   const anchored = anchors.get(t.id);
-  const quote = t.quote ? h('blockquote', {}, truncate(t.quote, 240)) : h('div', { class: 'gmp-lines' }, `Lines ${t.line_start}–${t.line_end}`);
+  const quote = anchorPreview(t, 240);
   const messages = t.messages.map((m) => h('div', { class: 'gmp-msg gmp-' + m.author },
     h('div', { class: 'gmp-meta', title: new Date(m.created_at * 1000).toLocaleString() },
       m.author === 'agent' ? 'agent' : 'you',
@@ -983,21 +984,31 @@ function renderCard(t) {
   }, quote, anchored ? null : h('span', { class: 'gmp-badge gmp-outdated' }, 'outdated'), messages, footer);
 }
 
+// The quoted text, or for a whole-block comment, the start of the block's source.
+function anchorPreview(a, n) {
+  if (a.quote) return h('blockquote', {}, truncate(a.quote, n));
+  return h('blockquote', {}, h('span', { class: 'gmp-lines' }, `Whole block, lines ${a.line_start}–${a.line_end}`), truncate(a.context, n));
+}
+
+// Submit controls sit at the top of the panel when it's open, and float in the corner when it isn't.
 function renderWidget() {
   const total = state.drafts;
   const here = state.threads.reduce((n, t) => n + t.messages.filter((m) => m.state === 'draft').length, 0);
+  const elsewhere = total - here;
+  const submit = () => [
+    h('span', {}, `${total} draft${total === 1 ? '' : 's'}` + (elsewhere ? ` (${elsewhere} on other pages)` : '')),
+    h('button', { class: 'gmp-primary', onclick: () => api('submit') }, 'Submit feedback'),
+  ];
+  const inPanel = document.body.classList.contains('gmp-panel-open');
+  ui.panelSubmit.hidden = !inPanel || !total;
+  ui.panelSubmit.replaceChildren(...(ui.panelSubmit.hidden ? [] : submit()));
+
   const [dot, status] = agentStatus();
   const busy = state.agent?.working_since || state.agent?.pending;
-  ui.widget.hidden = !total && !busy;
+  ui.widget.hidden = inPanel || (!total && !busy);
   if (ui.widget.hidden) return;
   const children = [h('span', { class: 'gmp-dot gmp-' + dot }), h('span', {}, status)];
-  if (total) {
-    const elsewhere = total - here;
-    children.push(
-      h('span', { class: 'gmp-sep' }),
-      h('span', {}, `${total} draft${total === 1 ? '' : 's'}` + (elsewhere ? ` (${elsewhere} on other pages)` : '')),
-      h('button', { class: 'gmp-primary', onclick: () => api('submit') }, 'Submit feedback'));
-  }
+  if (total) children.push(h('span', { class: 'gmp-sep' }), ...submit());
   ui.widget.replaceChildren(...children);
 }
 
@@ -1007,7 +1018,13 @@ function injectStyle() {
     ::highlight(gmp-active) { background-color: rgba(212, 167, 44, 0.65); }
     ::highlight(gmp-pending) { background-color: rgba(84, 174, 255, 0.4); }
     .gmp-block-pending { box-shadow: -6px 0 0 var(--accent); }
-    #gmp-widget[hidden], .gmp-add[hidden], .gmp-sel[hidden], .gmp-composer[hidden] { display: none; }
+    #gmp-widget[hidden], .gmp-add[hidden], .gmp-sel[hidden], .gmp-composer[hidden], .gmp-panel-submit[hidden] { display: none; }
+    .gmp-panel-submit {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px;
+      padding: 8px 10px; background: var(--bg); border: 1px solid #1f883d; border-radius: 6px;
+    }
+    .gmp-panel-submit button { padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; border-radius: 6px; }
+    blockquote .gmp-lines { display: block; margin-bottom: 2px; }
     .gmp-block { box-shadow: -6px 0 0 rgba(212, 167, 44, 0.55); }
     .gmp-block-active { box-shadow: -6px 0 0 rgba(212, 167, 44, 1); background-color: rgba(212, 167, 44, 0.12); }
     body.gmp-panel-open main { margin-right: ${PANEL_WIDTH}px; }

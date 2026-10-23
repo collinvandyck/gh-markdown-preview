@@ -26,10 +26,12 @@ mdp                          # preview the current directory
 mdp docs/architecture.md     # open one file
 mdp docs/                    # open the folder's README or index, or a listing if it has neither
 mdp ~/code/gh-markdown-preview/example   # the example docs
-mdp . --port 6500 --no-open  # pick a port, skip opening the browser
+mdp . --port 6500 --no-open  # fixed port, don't open the browser
 ```
 
-The served root defaults to the git toplevel of the path, so links that climb out of the folder you opened (`../other.md`) still resolve and the tree shows the whole repo. Pass `--root DIR` to serve something narrower or wider. The default port is 6419.
+The served root defaults to the git toplevel of the path, so links that climb out of the folder you opened (`../other.md`) still resolve and the tree shows the whole repo. Pass `--root DIR` to serve something narrower or wider.
+
+Each run listens on a port the OS picks, so several previews can run side by side; the URL is printed at startup and opened in your browser. Pass `--port` to pin one.
 
 ## Features
 
@@ -41,7 +43,7 @@ The served root defaults to the git toplevel of the path, so links that climb ou
 - **Theme.** Cycle between auto (follows the system), light, and dark.
 - **Wide mode.** Drops GitHub's 1012px content width cap, which helps with wide tables and diagrams.
 - **Live reload.** The page checks for changes every second and re-renders in place, keeping your scroll position. A folder listing page also picks up added or removed files. The sidebar tree refreshes on the next page load.
-- **Remembered layout.** Theme, wide mode, open folders, sidebar width, and sidebar scroll position persist across pages and sessions.
+- **Remembered layout.** Theme, wide mode, sidebar width, and whether the sidebar is hidden persist across pages and runs. Open folders and the sidebar's scroll position are remembered per served root. They're saved in `~/.config/gh-markdown-preview/prefs.json` (or under `$XDG_CONFIG_HOME`), not in browser storage, because browser storage is tied to the port and the port changes every run.
 
 ## Keyboard
 

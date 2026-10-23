@@ -23,6 +23,10 @@ MARKDOWN_SUFFIXES = (".md", ".markdown")
 SKIP_DIRS = {"node_modules", "vendor", "__pycache__", "dist", "build", "target"}
 MAX_TREE_FILES = 20000
 INDEX_NAMES = ["readme", "index"]
+PREFS_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gh-markdown-preview" / "prefs.json"
+# Open folders and sidebar scroll only make sense for the tree they were saved against. Everything else is global.
+ROOT_PREFS = {"gmp.open", "gmp.scroll"}
+PREFS_LOCK = threading.Lock()
 
 PAGE = """<!doctype html>
 <html>
@@ -48,10 +52,11 @@ PAGE = """<!doctype html>
     }
     document.documentElement.dataset.theme = mode;
   };
-  let gmpTheme = 'auto';
-  try { gmpTheme = JSON.parse(localStorage.getItem('gmp.theme')) || 'auto'; } catch (_) {}
+  // Preferences live on the server, because each run gets a new port and localStorage is per origin.
+  window.gmpPrefs = __PREFS__;
+  const gmpTheme = window.gmpPrefs['gmp.theme'];
   window.gmpApplyTheme(['auto', 'light', 'dark'].includes(gmpTheme) ? gmpTheme : 'auto');
-  try { if (JSON.parse(localStorage.getItem('gmp.wide'))) document.documentElement.classList.add('wide'); } catch (_) {}
+  if (window.gmpPrefs['gmp.wide']) document.documentElement.classList.add('wide');
 </script>
 <style>
   :root {
@@ -149,13 +154,26 @@ const kind = __KIND__;
 marked.use(gfmHeadingId());
 
 const store = {
+  pending: {},
+  timer: null,
   get(key, fallback) {
-    try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch (_) { return fallback; }
+    return window.gmpPrefs[key] ?? fallback;
   },
   set(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+    window.gmpPrefs[key] = value;
+    this.pending[key] = value;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.flush(), 300);
+  },
+  flush() {
+    clearTimeout(this.timer);
+    if (!Object.keys(this.pending).length) return;
+    const body = JSON.stringify(this.pending);
+    this.pending = {};
+    navigator.sendBeacon('/__prefs', new Blob([body], { type: 'application/json' }));
   },
 };
+window.addEventListener('pagehide', () => store.flush());
 
 // Sidebar.
 
@@ -374,6 +392,20 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002 (matches the base signature)
         pass
 
+    def do_POST(self):
+        if urlparse(self.path).path != "/__prefs":
+            return self.send_error(HTTPStatus.NOT_FOUND)
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            updates = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(updates, dict):
+                raise ValueError("expected an object")
+        except ValueError as err:
+            return self.send_error(HTTPStatus.BAD_REQUEST, str(err))
+        save_prefs(self.root, updates)
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self.end_headers()
+
     def do_GET(self):
         url = urlparse(self.path)
         if url.path == "/__mtime":
@@ -426,6 +458,7 @@ class Handler(SimpleHTTPRequestHandler):
             .replace("__CRUMBS__", self.crumbs(target))
             .replace("__PATH__", json.dumps(self.url_for(target)))
             .replace("__KIND__", json.dumps(kind))
+            .replace("__PREFS__", json.dumps(load_prefs(self.root)).replace("</", "<\\/"))
         )
         self.send_bytes(page.encode(), "text/html; charset=utf-8")
 
@@ -485,6 +518,37 @@ def markdown_files(root):
     return sorted(files)
 
 
+def load_prefs(root):
+    """Returns global preferences overlaid with the ones saved for this root."""
+    data = read_prefs_file()
+    return {**data.get("global", {}), **data.get("roots", {}).get(str(root), {})}
+
+
+def save_prefs(root, updates):
+    with PREFS_LOCK:
+        data = read_prefs_file()
+        for key, value in updates.items():
+            if not key.startswith("gmp."):
+                continue
+            if key in ROOT_PREFS:
+                bucket = data.setdefault("roots", {}).setdefault(str(root), {})
+            else:
+                bucket = data.setdefault("global", {})
+            bucket[key] = value
+        PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = PREFS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+        tmp.replace(PREFS_PATH)
+
+
+def read_prefs_file():
+    try:
+        data = json.loads(PREFS_PATH.read_text())
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
 def index_file(directory):
     """Returns the folder's README or index markdown file, preferring README, or None."""
     candidates = {}
@@ -542,7 +606,7 @@ def main():
     parser = argparse.ArgumentParser(description="Preview markdown with GitHub styling and Mermaid.")
     parser.add_argument("path", nargs="?", default=".", help="markdown file or directory to open (default: .)")
     parser.add_argument("--root", help="directory to serve (default: the git toplevel of PATH, else PATH)")
-    parser.add_argument("--port", type=int, default=6419)
+    parser.add_argument("--port", type=int, default=0, help="port to listen on (default: one the OS picks)")
     parser.add_argument("--no-open", action="store_true", help="don't open a browser")
     args = parser.parse_args()
 
@@ -556,7 +620,8 @@ def main():
 
     Handler.root = root
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    url = f"http://127.0.0.1:{args.port}{url_for(root, target)}"
+    port = server.server_address[1]
+    url = f"http://127.0.0.1:{port}{url_for(root, target)}"
     print(f"serving {root}\nopen {url}\nctrl-c to stop", flush=True)
     if not args.no_open:
         threading.Timer(0.3, webbrowser.open, [url]).start()

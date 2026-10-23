@@ -82,6 +82,12 @@ CREATE INDEX IF NOT EXISTS threads_file ON threads (file);
 CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread_id);
 """
 
+# An open thread the agent has the last word on, with no newer reply or draft from the user.
+ADDRESSED = (
+    "t.status = 'open'"
+    " AND (SELECT author FROM messages WHERE thread_id = t.id ORDER BY id DESC LIMIT 1) = 'agent'"
+)
+
 PAGE = """<!doctype html>
 <html>
 <head>
@@ -490,7 +496,7 @@ let ctx;
 let content = null;
 let sourceLines = [];
 let index = null;
-let state = { threads: [], drafts: 0, agent: {} };
+let state = { threads: [], drafts: 0, addressed: 0, agent: {} };
 let stateJSON = '';
 let anchors = new Map();
 let activeId = null;
@@ -1107,6 +1113,7 @@ function renderPanel() {
     h('header', {},
       h('strong', {}, 'Comments'),
       h('label', {}, h('input', { type: 'checkbox', checked: showResolved, onchange: (e) => { showResolved = e.target.checked; renderPanel(); } }), ` Resolved (${resolvedCount})`),
+      state.addressed ? h('button', { class: 'gmp-resolve-all', title: 'Resolve every thread the agent has answered, on every page', onclick: resolveAddressed }, `Resolve all (${state.addressed})`) : null,
       h('button', { class: 'gmp-close', title: 'Close (c)', onclick: () => setPanel(false) }, '×')),
     h('div', { class: 'gmp-status' }, h('span', { class: 'gmp-dot gmp-' + dot }), status),
   );
@@ -1158,6 +1165,14 @@ function renderCard(t) {
 function resolve(id) {
   if (activeId === id) activeId = null;
   return api('status', { thread_id: id, status: 'resolved' });
+}
+
+function resolveAddressed() {
+  const n = state.addressed;
+  if (!confirm(`Resolve ${n} thread${n === 1 ? '' : 's'} the agent has answered, across all pages?`)) return;
+  const active = state.threads.find((t) => t.id === activeId);
+  if (active && active.messages.at(-1)?.author === 'agent') activeId = null;
+  return api('resolve-addressed');
 }
 
 function anchorPreview(a, n) {
@@ -1218,6 +1233,7 @@ function injectStyle() {
     }
     #gmp-panel header { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
     #gmp-panel header label { color: var(--muted); font-size: 12px; margin-left: auto; }
+    .gmp-resolve-all { padding: 2px 8px; font: inherit; font-size: 12px; cursor: pointer; border-radius: 6px; }
     .gmp-close { border: none; background: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 0 4px; }
     .gmp-status { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; margin-bottom: 12px; }
     .gmp-empty { color: var(--muted); }
@@ -1408,6 +1424,13 @@ class Handler(SimpleHTTPRequestHandler):
         conn.execute("UPDATE threads SET status = ? WHERE id = ?", (status, thread["id"]))
         return {}
 
+    def feedback_resolve_addressed(self, conn, body):
+        """Resolves every addressed thread under the root, not just the page's."""
+        cur = conn.execute(
+            f"UPDATE threads SET status = 'resolved' WHERE id IN (SELECT t.id FROM threads t WHERE {ADDRESSED})"
+        )
+        return {"resolved": cur.rowcount}
+
     def feedback_settle_anchor(self, conn, body):
         """Stores the anchor the page found for a thread the agent moved, so it no longer depends on line numbers."""
         fields = {k: str(body.get(k, "")) for k in ("quote", "prefix", "suffix", "context")}
@@ -1485,6 +1508,7 @@ FEEDBACK_ACTIONS = {
     "status": Handler.feedback_set_status,
     "submit": Handler.feedback_submit,
     "anchor": Handler.feedback_settle_anchor,
+    "resolve-addressed": Handler.feedback_resolve_addressed,
 }
 
 
@@ -1663,7 +1687,8 @@ def feedback_state(conn, file):
         for t in conn.execute("SELECT * FROM threads WHERE file = ? ORDER BY id", (file,))
     ]
     drafts = conn.execute("SELECT COUNT(*) FROM messages WHERE author = 'user' AND batch_id IS NULL").fetchone()[0]
-    return {"threads": threads, "drafts": drafts, "agent": agent_status(conn)}
+    addressed = conn.execute(f"SELECT COUNT(*) FROM threads t WHERE {ADDRESSED}").fetchone()[0]
+    return {"threads": threads, "drafts": drafts, "addressed": addressed, "agent": agent_status(conn)}
 
 
 def agent_status(conn):

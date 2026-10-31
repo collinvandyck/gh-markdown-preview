@@ -27,9 +27,10 @@ ROOT is the served root, usually the git toplevel of the worktree being previewe
 Start the server yourself unless the user says one is already running with `--feedback`. A server the user started without `--feedback` doesn't collect comments, so start a new one rather than reuse it.
 
 1. Work out PATH: the file or folder the user wants to review. A folder opens on its README or index.
-2. Run it with `run_in_background: true` so it outlives the turn, through `python3` so a `python3` allow rule covers it:
+2. Run it with `run_in_background: true` so it outlives the turn, through `python3` so a `python3` allow rule covers it. When PATH is a folder, also pass `--root PATH`. Without it the server shares the whole git toplevel, not just the folder the user asked for:
    ```sh
-   python3 /path/to/gh-markdown-preview/preview.py PATH --feedback
+   python3 /path/to/gh-markdown-preview/preview.py PATH --feedback             # a file
+   python3 /path/to/gh-markdown-preview/preview.py PATH --feedback --root PATH # a folder
    ```
    Leave off `--no-open`. The server opens the page in the user's browser. Each run gets its own port, so this never collides with another preview.
 3. Read the task's output file. The server prints `serving ROOT`, `open URL`, and the exact `feedback wait` command for that root. Take ROOT from there. Don't guess it.

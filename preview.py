@@ -1329,8 +1329,15 @@ class Handler(SimpleHTTPRequestHandler):
         if url.path == "/__feedback/state":
             if not self.feedback_allowed():
                 return self.send_error(HTTPStatus.NOT_FOUND)
+            page = parse_qs(url.query).get("path", [""])[0]
+            target = self.resolve(page)
+            try:
+                # A folder listing has no comments, but its widget still shows drafts and agent status for the root.
+                file = None if target and target.is_dir() else self.rel_file(page)
+            except ValueError as err:
+                return self.send_error(HTTPStatus.BAD_REQUEST, f"bad request: {err}")
             with feedback_db(self.root) as conn:
-                state = feedback_state(conn, self.rel_file(parse_qs(url.query).get("path", [""])[0]))
+                state = feedback_state(conn, file)
             return self.send_bytes(json.dumps(state).encode(), "application/json")
 
         target = self.resolve(url.path)
@@ -1681,11 +1688,14 @@ def load_messages(conn, where, params):
 
 
 def feedback_state(conn, file):
-    messages = load_messages(conn, "t.file = ?", (file,))
-    threads = [
-        {**dict(t), "messages": messages.get(t["id"], [])}
-        for t in conn.execute("SELECT * FROM threads WHERE file = ? ORDER BY id", (file,))
-    ]
+    """Returns the threads on file, or none when file is None, along with counts and agent status for the whole root."""
+    threads = []
+    if file is not None:
+        messages = load_messages(conn, "t.file = ?", (file,))
+        threads = [
+            {**dict(t), "messages": messages.get(t["id"], [])}
+            for t in conn.execute("SELECT * FROM threads WHERE file = ? ORDER BY id", (file,))
+        ]
     drafts = conn.execute("SELECT COUNT(*) FROM messages WHERE author = 'user' AND batch_id IS NULL").fetchone()[0]
     addressed = conn.execute(f"SELECT COUNT(*) FROM threads t WHERE {ADDRESSED}").fetchone()[0]
     return {"threads": threads, "drafts": drafts, "addressed": addressed, "agent": agent_status(conn)}

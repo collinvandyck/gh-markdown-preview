@@ -25,6 +25,7 @@ Python 3.9 or newer is all it needs. Rendering happens in the browser with `mark
 mdp                          # preview the current directory
 mdp docs/architecture.md     # open one file
 mdp docs/                    # open the folder's README or index, or a listing if it has neither
+mdp plan.md spec.md          # open plan.md, and list both in the tree even if git ignores them
 mdp ~/code/gh-markdown-preview/example   # the example docs
 mdp . --port 6500 --no-open  # fixed port, don't open the browser
 mdp docs/ --feedback         # collect comments for an agent (see below)
@@ -39,7 +40,7 @@ Each run listens on a port the OS picks, so several previews can run side by sid
 - **GitHub rendering.** `github-markdown-css` styles, GitHub-flavored markdown (tables, task lists, strikethrough), and heading anchors with GitHub's IDs, so links like `page.md#some-heading` land where they would on GitHub.
 - **Mermaid.** Fenced `mermaid` blocks render as diagrams, in a theme that matches the page. A diagram that fails to parse shows the error and its source in place.
 - **Syntax highlighting** with `highlight.js` and GitHub's light and dark themes.
-- **File tree.** A sidebar lists every markdown file under the root. Each folder shows its README or index first, then subfolders, then files. The current file is highlighted and its folders open. In a git repo the tree comes from `git ls-files`, so ignored files stay out. Anywhere else it walks the directory and skips hidden folders, `node_modules`, `vendor`, and build output.
+- **File tree.** A sidebar lists every markdown file under the root. Each folder shows its README or index first, then subfolders, then files. The current file is highlighted and its folders open. In a git repo the tree comes from `git ls-files`, so ignored files stay out, except files named on the command line. Anywhere else it walks the directory and skips hidden folders, `node_modules`, `vendor`, and build output.
 - **Filter.** Type in the box above the tree to narrow it to matching paths. Enter opens the first match.
 - **Theme.** Cycle between auto (follows the system), light, and dark.
 - **Wide mode.** Drops GitHub's 1012px content width cap, which helps with wide tables and diagrams.

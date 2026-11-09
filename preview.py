@@ -1290,6 +1290,8 @@ function injectStyle() {
 
 class Handler(SimpleHTTPRequestHandler):
     root: Path
+    # Files named on the command line, relative to root. The tree lists them even when git ignores them.
+    named_files: tuple[str, ...] = ()
     feedback = False
     # Every feedback request must carry this. It keeps other pages open in the browser from posting comments, which
     # an agent would then act on.
@@ -1323,7 +1325,7 @@ class Handler(SimpleHTTPRequestHandler):
         if url.path == "/__mtime":
             return self.send_mtime(parse_qs(url.query).get("path", [""])[0])
         if url.path == "/__tree":
-            return self.send_bytes(json.dumps(build_tree(self.root)).encode(), "application/json")
+            return self.send_bytes(json.dumps(build_tree(self.root, self.named_files)).encode(), "application/json")
         if url.path == "/__feedback.js" and self.feedback:
             return self.send_bytes(FEEDBACK_JS.encode(), "text/javascript; charset=utf-8")
         if url.path == "/__feedback/state":
@@ -1469,7 +1471,7 @@ class Handler(SimpleHTTPRequestHandler):
             mtime = None
         elif target.is_dir():
             # A directory listing changes when markdown files are added or removed anywhere below it.
-            mtime = hash(json.dumps(build_tree(self.root)))
+            mtime = hash(json.dumps(build_tree(self.root, self.named_files)))
         else:
             mtime = target.stat().st_mtime_ns
         self.send_bytes(json.dumps({"mtime": mtime}).encode(), "application/json")
@@ -1729,13 +1731,15 @@ def sort_key(node):
     return (2, name)
 
 
-def build_tree(root):
-    """Builds a nested {name, path, children} tree of the markdown files under root.
+def build_tree(root, named_files=()):
+    """Builds a nested {name, path, children} tree of the markdown files under root, plus named_files.
 
+    named_files are paths relative to root that the tree lists even when git ignores them or the file cap is reached.
     Within a folder, a README or index file comes first, then subfolders, then the remaining files.
     """
     top = {"name": root.name, "path": "/", "children": {}}
-    for rel in markdown_files(root):
+    named = {f for f in named_files if (root / f).is_file()}
+    for rel in sorted(set(markdown_files(root)) | named):
         node = top
         parts = rel.split("/")
         for i, name in enumerate(parts[:-1]):
@@ -1983,22 +1987,30 @@ def main():
         description="Preview markdown with GitHub styling and Mermaid.",
         epilog="Run `preview.py feedback --help` for the commands an agent uses to read and answer comments.",
     )
-    parser.add_argument("path", nargs="?", default=".", help="markdown file or directory to open (default: .)")
-    parser.add_argument("--root", help="directory to serve (default: the git toplevel of PATH, else PATH)")
+    parser.add_argument(
+        "paths", nargs="*", default=["."], metavar="PATH",
+        help="markdown files or directories; the first one opens (default: .). The tree lists named files even when "
+        "git ignores them",
+    )
+    parser.add_argument("--root", help="directory to serve (default: the git toplevel of the first PATH, else PATH)")
     parser.add_argument("--port", type=int, default=0, help="port to listen on (default: one the OS picks)")
     parser.add_argument("--no-open", action="store_true", help="don't open a browser")
     parser.add_argument("--feedback", action="store_true", help="let the page collect comments for an agent")
     args = parser.parse_args()
 
-    target = Path(args.path).resolve()
-    if not target.exists():
-        sys.exit(f"no such file or directory: {args.path}")
+    targets = [Path(p).resolve() for p in args.paths]
+    for path, target in zip(args.paths, targets):
+        if not target.exists():
+            sys.exit(f"no such file or directory: {path}")
+    target = targets[0]
     start_dir = target if target.is_dir() else target.parent
     root = Path(args.root).resolve() if args.root else (git_toplevel(start_dir) or start_dir)
-    if not target.is_relative_to(root):
-        sys.exit(f"{target} is outside the served root {root}")
+    for t in targets:
+        if not t.is_relative_to(root):
+            sys.exit(f"{t} is outside the served root {root}")
 
     Handler.root = root
+    Handler.named_files = tuple(t.relative_to(root).as_posix() for t in targets if t.is_file())
     Handler.feedback = args.feedback
     Handler.token = secrets.token_urlsafe(24)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
